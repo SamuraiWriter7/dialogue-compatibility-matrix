@@ -1,0 +1,134 @@
+name: Validate DCM v0.1
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: DCM Compatibility Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check Python syntax
+        run: python -m py_compile scripts/validate.py
+
+      - name: Prepare test fixtures
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          source = Path("examples/comparison.json")
+          data = json.loads(source.read_text(encoding="utf-8"))
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "dcm"
+          output.mkdir(parents=True, exist_ok=True)
+
+          # PASS: decrease exactly equal to tolerance is allowed.
+          passing = json.loads(json.dumps(data))
+          passing["candidate"] = [
+              row[:] for row in data["baseline"]
+          ]
+          passing["candidate"][0][0] = 0.80
+
+          (output / "pass.json").write_text(
+              json.dumps(passing, indent=2),
+              encoding="utf-8"
+          )
+
+          # INVALID: Boolean values are not valid scores.
+          invalid = json.loads(json.dumps(data))
+          invalid["candidate"][0][0] = True
+
+          (output / "invalid.json").write_text(
+              json.dumps(invalid, indent=2),
+              encoding="utf-8"
+          )
+
+          # INVALID: Duplicate JSON object keys.
+          (output / "duplicate.json").write_text(
+              '{"spec_version":"0.1","spec_version":"0.1"}',
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Verify regression detection
+        shell: bash
+        run: |
+          set +e
+          python scripts/validate.py \
+            examples/comparison.json > report.txt 2>&1
+          status=$?
+          set -e
+
+          cat report.txt
+
+          test "$status" -eq 1
+          grep -q "^Result: REGRESSION$" report.txt
+          grep -q "^Total regressions: 3$" report.txt
+          grep -q "T001 / D1:" report.txt
+          grep -q "T001 / D2:" report.txt
+          grep -q "T001 / D3:" report.txt
+
+      - name: Verify passing comparison
+        shell: bash
+        run: |
+          set +e
+          python scripts/validate.py \
+            "$RUNNER_TEMP/dcm/pass.json" > report.txt 2>&1
+          status=$?
+          set -e
+
+          cat report.txt
+
+          test "$status" -eq 0
+          grep -q "^Result: PASS$" report.txt
+          grep -q "^Total regressions: 0$" report.txt
+
+      - name: Verify invalid score rejection
+        shell: bash
+        run: |
+          set +e
+          python scripts/validate.py \
+            "$RUNNER_TEMP/dcm/invalid.json" \
+            > report.txt 2>&1
+          status=$?
+          set -e
+
+          cat report.txt
+
+          test "$status" -eq 2
+          grep -q "DCM INVALID:" report.txt
+
+      - name: Verify duplicate key rejection
+        shell: bash
+        run: |
+          set +e
+          python scripts/validate.py \
+            "$RUNNER_TEMP/dcm/duplicate.json" \
+            > report.txt 2>&1
+          status=$?
+          set -e
+
+          cat report.txt
+
+          test "$status" -eq 2
+          grep -q "duplicate JSON key" report.txt
+
+      - name: Validation completed
+        run: |
+          echo "DCM v0.1 validation completed successfully."
